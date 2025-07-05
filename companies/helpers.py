@@ -296,55 +296,157 @@ def update_company(company, data):
     except Exception as e:
         return None, str(e)
 
-def invite_user_to_company(company, data, invited_by):
+def invite_company_user(company, email, role, invited_by):
     """
-    Create an invite for a user to join a company.
+    Generic function to invite a user to a company with a specific role.
     
     Args:
-        company (Company): The company to invite to
-        data (dict): Validated invitation data
+        company (Company): The company to invite the user to
+        email (str): Email of the user to invite
+        role (str): Role to assign (e.g., 'hr_manager', 'interviewer', 'recruiter')
         invited_by (User): The user creating the invitation
         
     Returns:
-        tuple: (invite_token, error) where error is None if creation successful
+        tuple: (user, auth_token, error) where error is None if invitation successful
     """
-    from datetime import timedelta
+    from django.contrib.auth import get_user_model
+    from companies.models import CompanyUser
+    from rest_framework.authtoken.models import Token
+    from utils.email import send_email
+    from django.conf import settings
+    import uuid
+    from django.db import transaction
+    from django.utils import timezone
     
-    try:
-        # Create an invite token
-        token = InviteToken.objects.create(
-            token_type='user_invite',
-            company=company,
-            email=data['email'],
-            data={
-                'role': data['role'],
-                'permissions': data.get('permissions', {})
-            },
-            expires_at=timezone.now() + timedelta(days=7)
-        )
-        
-        # Check if user already exists
-        user = None
+    User = get_user_model()
+    
+    # Validate role
+    valid_roles = ['company_admin', 'hr_manager', 'interviewer', 'recruiter']
+    if role not in valid_roles:
+        return None, None, f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}"
+    
+    # Check if user exists
+    user_exists = False
+    user = None
+    auth_token = None
+    
+    with transaction.atomic():
         try:
-            user = User.objects.get(email=data['email'])
+            user = User.objects.get(email=email)
+            user_exists = True
         except User.DoesNotExist:
-            pass
-            
-        # Create pending company user association
-        company_user = CompanyUser.objects.create(
-            user=user,  # May be None
-            company=company,
-            role=data['role'],
-            permissions=data.get('permissions', {}),
-            status='pending_setup',
-            invited_by=invited_by,
-            invited_at=timezone.now()
-        )
+            # Create a new user with a temporary password
+            temp_password = str(uuid.uuid4())
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=temp_password,
+                user_type=role,  # Set user_type to match the role
+                is_active=True,
+                # We'll leave first_name and last_name empty for the user to fill in
+            )
         
-        if user:
-            token.user = user
-            token.save()
-            
-        return token, None
-    except Exception as e:
-        return None, str(e)
+        # Check if user is already a company member
+        existing_company_user = CompanyUser.objects.filter(
+            user=user,
+            company=company
+        ).first()
+        
+        # If not a company member, create with specified role
+        if not existing_company_user:
+            CompanyUser.objects.create(
+                user=user,
+                company=company,
+                role=role,
+                status='active',
+                invited_by=invited_by,
+                invited_at=timezone.now(),
+                activated_at=timezone.now()
+            )
+        # If they are a member but with a different role, update if appropriate
+        elif existing_company_user.role != role:
+            # Only upgrade role if not already a company_admin, or if the new role is company_admin
+            if role == 'company_admin' or existing_company_user.role not in ['company_admin']:
+                existing_company_user.role = role
+                existing_company_user.save()
+        
+        # Generate or retrieve auth token
+        auth_token, _ = Token.objects.get_or_create(user=user)
+    
+    # Generate frontend URL for the dashboard with the auth token
+    has_password_set = user.has_usable_password() and user_exists
+    
+    # Determine the dashboard URL based on role
+    if role == 'interviewer':
+        dashboard_path = 'interviewer-dashboard'
+    else:
+        dashboard_path = 'dashboard'
+        
+    dashboard_url = f"{company.subdomain}.{settings.FRONTEND_BASE_URL}/{dashboard_path}?token={auth_token.key}"
+    
+    # If it's a new user, append setup parameter to indicate password setup is needed
+    if not has_password_set:
+        dashboard_url += "&setup=1"
+    
+    # Get role display name
+    role_display = {
+        'company_admin': 'Company Administrator',
+        'hr_manager': 'HR Manager',
+        'interviewer': 'Interviewer',
+        'recruiter': 'Recruiter'
+    }.get(role, role.replace('_', ' ').title())
+    
+    # Send invitation email
+    email_subject = f"You've been added as a {role_display} for {company.name}"
+    
+    # Different email body based on whether user exists and has password
+    if user_exists and has_password_set:
+        email_body = f"""
+Hello,
+
+You have been added as a {role_display} for {company.name} by {invited_by.first_name} {invited_by.last_name}.
+
+You can now access your dashboard and manage your assigned tasks.
+
+Please click on the following link to access your dashboard:
+{dashboard_url}
+
+Thank you,
+The {company.name} Team
+        """
+    else:
+        email_body = f"""
+Hello,
+
+You have been added as a {role_display} for {company.name} by {invited_by.first_name} {invited_by.last_name}.
+
+An account has been created for you. Please click on the following link to set your password and complete your profile:
+{dashboard_url}
+
+Once you've set up your account, you'll have access to your dashboard where you can manage your assigned tasks.
+
+Thank you,
+The {company.name} Team
+        """
+    
+    # HTML version for better formatting
+    html_content = email_body.replace('\n', '<br>')
+    
+    # Send the email
+    send_email(
+        subject=email_subject,
+        body=email_body,
+        to_email=email,
+        from_email=f"{company.name} <no-reply@{settings.FRONTEND_BASE_URL}>",
+        html_content=html_content,
+        template_context={
+            'invited_by_name': f"{invited_by.first_name} {invited_by.last_name}",
+            'company_name': company.name,
+            'role': role,
+            'role_display': role_display,
+            'dashboard_url': dashboard_url,
+            'is_new_user': not has_password_set
+        }
+    )
+    
+    return user, auth_token, None

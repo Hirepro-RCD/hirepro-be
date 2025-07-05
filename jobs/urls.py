@@ -14,6 +14,9 @@ urlpatterns = [
     path('<uuid:pk>/update/', views.update_job_view, name='job-update'),
     path('<uuid:pk>/delete/', views.delete_job, name='job-delete'),
     
+    # Invite interviewer
+    path('<uuid:job_id>/invite-interviewer/', views.invite_interviewer_view, name='job-invite-interviewer'),
+    
     # Dashboard view
     path('dashboard/', views.dashboard_view, name='job-dashboard'),
 ]

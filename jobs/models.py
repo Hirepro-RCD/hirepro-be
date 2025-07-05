@@ -74,6 +74,9 @@ class Job(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default='PUBLIC')
     
+    # Additional timestamp for tracking when a job is published
+    published_at = models.DateTimeField(null=True, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -82,3 +85,26 @@ class Job(models.Model):
         
     def __str__(self):
         return f"{self.title} at {self.company.name}"
+
+
+class JobInterviewer(models.Model):
+    """
+    Associates users with jobs as interviewers.
+    """
+    STATUS_CHOICES = [
+        ('ACTIVE', 'Active'),
+        ('INACTIVE', 'Inactive'),
+    ]
+    
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='interviewers')
+    interviewer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='interviewer_jobs')
+    added_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='added_interviewers')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['job', 'interviewer']
+        
+    def __str__(self):
+        return f"{self.interviewer.email} - {self.job.title}"

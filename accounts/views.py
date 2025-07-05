@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from .models import User
 from companies.models import Company, CompanyUser, InviteToken
+from rest_framework.authtoken.models import Token
 
 from .helpers import (
     user_to_dict,
@@ -161,3 +162,152 @@ def login_view(request):
         response_data['company_domain'] = company_domain
         
     return Response(response_data)
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def validate_setup_token(request):
+    """
+    Validate a setup token and return information about the associated user.
+    This is used by the frontend to confirm if a token is valid before showing
+    the setup form, and to determine what type of account is being set up.
+    """
+    # Get token from request
+    token_key = request.data.get('token')
+    if not token_key:
+        return Response({"detail": "Token is required."}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # Find the auth token
+        auth_token = Token.objects.get(key=token_key)
+        user = auth_token.user
+    except Token.DoesNotExist:
+        return Response({"detail": "Invalid token."}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Check if user has a usable password (i.e., if setup is needed)
+    requires_setup = not user.has_usable_password()
+    
+    # Get user's company information
+    from companies.models import CompanyUser
+    company_user = CompanyUser.objects.filter(user=user, status='active').order_by('-created_at').first()
+    
+    company_data = None
+    if company_user:
+        company_data = {
+            "id": str(company_user.company.id),
+            "name": company_user.company.name,
+            "subdomain": company_user.company.subdomain,
+            "role": company_user.role
+        }
+    
+    # Return basic user info
+    return Response({
+        "token_valid": True,
+        "requires_setup": requires_setup,
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "user_type": user.user_type
+        },
+        "company": company_data
+    })
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def complete_user_setup(request):
+    """
+    Complete user setup after receiving an invitation.
+    This endpoint is used when a user receives an invite email with a token,
+    and needs to set their password and complete their profile.
+    """
+    # Validate token
+    token_key = request.data.get('token')
+    if not token_key:
+        return Response({"detail": "Token is required."}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # Find the auth token
+        auth_token = Token.objects.get(key=token_key)
+        user = auth_token.user
+    except Token.DoesNotExist:
+        return Response({"detail": "Invalid token."}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Validate required fields
+    required_fields = ['password', 'first_name', 'last_name']
+    for field in required_fields:
+        if not request.data.get(field):
+            return Response(
+                {"detail": f"{field.replace('_', ' ').title()} is required."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    # Update user information
+    user.first_name = request.data.get('first_name')
+    user.last_name = request.data.get('last_name')
+    user.set_password(request.data.get('password'))
+    
+    # Optional fields
+    if 'phone' in request.data:
+        user.phone = request.data.get('phone')
+    
+    user.save()
+    
+    # Generate a new auth token (invalidate the old one for security)
+    auth_token.delete()
+    new_token = Token.objects.create(user=user)
+    
+    # Get user's company information
+    from companies.models import CompanyUser
+    company_user = CompanyUser.objects.filter(user=user, status='active').order_by('-created_at').first()
+    
+    company_data = None
+    if company_user:
+        company_data = {
+            "id": str(company_user.company.id),
+            "name": company_user.company.name,
+            "subdomain": company_user.company.subdomain,
+            "role": company_user.role
+        }
+    
+    # Notify the user that their account has been set up
+    from utils.email import send_email
+    from django.conf import settings
+    
+    email_subject = "Your Account Setup is Complete"
+    email_body = f"""
+Hello {user.first_name},
+
+Your account setup is now complete. You can now log in and access your dashboard.
+
+Thank you,
+The HirePro Team
+    """
+    
+    # HTML version for better formatting
+    html_content = email_body.replace('\n', '<br>')
+    
+    # Send email
+    send_email(
+        subject=email_subject,
+        body=email_body,
+        to_email=user.email,
+        html_content=html_content,
+        from_email=f"HirePro <no-reply@{settings.FRONTEND_BASE_URL}>",
+        template_context={
+            'first_name': user.first_name
+        }
+    )
+    
+    return Response({
+        "message": "Account setup completed successfully.",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "user_type": user.user_type
+        },
+        "token": new_token.key,
+        "company": company_data
+    })

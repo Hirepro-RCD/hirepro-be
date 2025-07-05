@@ -13,6 +13,8 @@ urlpatterns = [
     path('login/', views.login_view, name='login'),
     path('signup/company/', views.company_admin_signup, name='company_signup'),
     path('signup/candidate/', views.candidate_signup, name='candidate_signup'),
+    path('setup/complete/', views.complete_user_setup, name='complete-user-setup'),
+    path('setup/validate-token/', views.validate_setup_token, name='validate-setup-token'),
     
     # # Authentication endpoints - commented out as they're not implemented yet
     # path('logout/', views.logout_view, name='logout'),

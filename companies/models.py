@@ -75,6 +75,7 @@ class InviteToken(models.Model):
         ('user_invite', 'User Invite'),
         ('password_reset', 'Password Reset'),
         ('company_setup', 'Company Setup'),
+    ('interviewer_invite', 'Interviewer Invite'), 
     ]
     
     token = models.UUIDField(default=uuid.uuid4, unique=True)

@@ -13,7 +13,7 @@ from .helpers import (
     is_company_member, is_company_admin, get_user_companies,
     company_to_dict, company_user_to_dict, invite_token_to_dict,
     validate_company_data, validate_company_user_data,
-    create_company, update_company, invite_user_to_company
+    create_company, update_company, invite_company_user
 )
 
 # Custom permission classes
@@ -143,28 +143,86 @@ def list_company_users(request, company_id):
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated, IsCompanyAdmin])
-def invite_company_user(request, company_id):
+def invite_company_user_view(request, company_id):
     """
-    Invite a user to join a company.
+    Invite a user to a company with a specific role.
+    Generic endpoint for inviting users with any valid role (interviewer, HR manager, etc.)
     """
-    if not is_company_admin(request, company_id):
+    # Get company by primary key
+    try:
+        company = Company.objects.get(id=company_id)
+    except Company.DoesNotExist:
+        return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+    
+    # Check if user has admin permissions for this company
+    company_user = CompanyUser.objects.filter(
+        user=request.user,
+        company=company,
+        role='company_admin',
+        status='active'
+    ).first()
+    
+    if not company_user:
+        return Response({"detail": "You don't have admin permissions for this company."}, 
+                      status=status.HTTP_403_FORBIDDEN)
+    
+    # Validate required fields
+    email = request.data.get('email')
+    role = request.data.get('role')
+    
+    if not email:
         return Response(
-            {"detail": "You do not have permission to invite users to this company."},
-            status=status.HTTP_403_FORBIDDEN
+            {"detail": "Email is required."},
+            status=status.HTTP_400_BAD_REQUEST
         )
     
-    company = get_object_or_404(Company, id=company_id)
-    errors, validated_data = validate_company_user_data(request.data)
+    if not role:
+        return Response(
+            {"detail": "Role is required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
-    if errors:
-        return Response(errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    token, error = invite_user_to_company(company, validated_data, request.user)
+    # Invite the company user with the specified role
+    user, auth_token, error = invite_company_user(company, email, role, request.user)
     
     if error:
         return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
     
-    return Response(invite_token_to_dict(token), status=status.HTTP_201_CREATED)
+    # Generate frontend URL for the dashboard
+    from django.conf import settings
+    
+    # Check if the user needs to set up their password
+    has_password_set = user.has_usable_password()
+    
+    # Determine the dashboard URL based on role
+    if role == 'interviewer':
+        dashboard_path = 'interviewer-dashboard'
+    else:
+        dashboard_path = 'dashboard'
+        
+    dashboard_url = f"{company.subdomain}.{settings.FRONTEND_BASE_URL}/{dashboard_path}?token={auth_token.key}"
+    
+    # If it's a new user, append setup parameter to indicate password setup is needed
+    if not has_password_set:
+        dashboard_url += "&setup=1"
+    
+    # Get role display name
+    role_display = {
+        'company_admin': 'Company Administrator',
+        'hr_manager': 'HR Manager',
+        'interviewer': 'Interviewer',
+        'recruiter': 'Recruiter'
+    }.get(role, role.replace('_', ' ').title())
+    
+    return Response({
+        "message": f"{role_display} added successfully.",
+        "user_id": str(user.id),
+        "email": user.email,
+        "role": role,
+        "token": auth_token.key,
+        "dashboard_url": dashboard_url,
+        "requires_setup": not has_password_set
+    }, status=status.HTTP_201_CREATED)
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated, IsCompanyMember])

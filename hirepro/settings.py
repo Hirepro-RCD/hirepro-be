@@ -158,3 +158,5 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://hirepro.com",
 ]
+
+FRONTEND_BASE_URL = ENV('FRONTEND_BASE_URL')
